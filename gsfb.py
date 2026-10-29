@@ -193,7 +193,7 @@ def catalog_shell_maps(gal, rand, chi_edges, nside, mask=None, weights=None, sub
     maps = np.empty((n_shell, npix))
     for i in range(n_shell):
         sel = ig == i
-        counts = np.bincount(pg[sel], weights=wg[sel], minlength=npix)
+        counts = np.float64(np.bincount(pg[sel], weights=wg[sel], minlength=npix))
         if subtract_randoms:
             counts -= alpha * np.bincount(pr[ir == i], minlength=npix)
         maps[i] = counts / (omega_pix * V[i])
