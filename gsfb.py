@@ -193,7 +193,7 @@ def catalog_shell_maps(gal, rand, chi_edges, nside, mask=None, weights=None, sub
     maps = np.empty((n_shell, npix))
     for i in range(n_shell):
         sel = ig == i
-        counts = np.float64(np.bincount(pg[sel], weights=wg[sel], minlength=npix))
+        counts = np.bincount(pg[sel], weights=wg[sel], minlength=npix)
         if subtract_randoms:
             counts -= alpha * np.bincount(pr[ir == i], minlength=npix)
         maps[i] = counts / (omega_pix * V[i])
@@ -243,7 +243,8 @@ def _wigner3j_000_sq(a, L, b):
     return np.where(ok, np.exp(lg), 0.0)
 
 
-def gsfb_multipoles(out, I22, max_multipole=4, shot=None, nside=None, angle_average=False, out2=None):
+def gsfb_multipoles(out, I22, max_multipole=4, shot=None, nside=None, angle_average=False, out2=None,
+                    subtract_shot=True):
     r"""
     Power spectrum multipoles P_L(k), L = 0..max_multipole, from the gSFB coefficients (Eq. 6):
 
@@ -258,18 +259,23 @@ def gsfb_multipoles(out, I22, max_multipole=4, shot=None, nside=None, angle_aver
                     Lmax >= lmax + max_multipole (the Bessel order reaches b + L). Field 1 carries
                     the Bessel order a, i.e. it plays the role of F_L in a Yamamoto estimator, so
                     P^{12}_L and P^{21}_L differ (odd L change sign in the plane-parallel limit).
-    I22           : normalisation. Auto: int nbar^2 W^2 d^3x. Cross: int nbar1 nbar2 W1 W2 d^3x
-                    (same galaxies -> the same I22; otherwise e.g. sqrt(I22_1 * I22_2)).
+    I22           : normalisation. Auto: int nbar^2 W^2 d^3x. Cross: the overlap int nbar1 nbar2 W1 W2 d^3x
+                    (same galaxies -> the same I22). Do not use sqrt(I22_1 * I22_2): it is >= the overlap
+                    and biases the cross-spectrum low when the samples or footprints differ.
     shot          : (n_shell,) Poisson noise per shell map. Auto: catalog_shell_maps()['shot'].
                     Cross: cross_shot(...) when both fields share objects; None when they don't.
-                    Subtracted as D_shot = (2b+1)/(4pi) sum_i shot_i R1[a,k,i] R2[b,k,i].
+                    Shot spectrum D_shot = (2b+1)/(4pi) sum_i shot_i R1[a,k,i] R2[b,k,i], returned as 'P_shot'.
     nside         : if given, deconvolve the HEALPix pixel window (after removing shot noise,
                     which is not smoothed by pixelisation).
     angle_average : divide by 4pi (standard Yamamoto convention, int dOmega_k / 4pi).
     out2          : field 2 (same k, lmax and Bessel orders as out), or None for the auto-spectrum.
+    subtract_shot : if True (default) 'P' is shot-noise subtracted; if False 'P' keeps the shot noise,
+                    i.e. P = P_signal + P_shot (the shot part is not pixel-window deconvolved).
 
     Returns dict with 'P' (max_multipole+1, n_k) complex: even L real, odd L carry the factor i
-    (e.g. the galaxy-momentum cross-spectrum lives mainly in the odd multipoles), 'k', 'multipoles'.
+    (e.g. the galaxy-momentum cross-spectrum lives mainly in the odd multipoles), 'k', 'multipoles',
+    and, when shot is given, 'P_shot': the expected Poisson shot-noise multipoles in the same convention
+    (add it to the model if you keep the shot noise in the data).
     """
     out2 = out if out2 is None else out2
     F1, R1, F2, R2 = out["flm"], out["R"], out2["flm"], out2["R"]
@@ -287,6 +293,7 @@ def gsfb_multipoles(out, I22, max_multipole=4, shot=None, nside=None, angle_aver
     pw2 = hp.pixwin(nside, lmax=lmax) ** 2 if nside is not None else np.ones(lmax + 1)
 
     P = np.zeros((max_multipole + 1, n_k), dtype=complex)
+    P_shot = np.zeros_like(P)
     for d in range(-max_multipole, max_multipole + 1):          # d = a - b
         ok = ell + d >= 0
         # sum over m = -b..b of F1 F2^*, using F_{b,-m} = (-1)^m F_{bm}^* for real fields
@@ -302,8 +309,16 @@ def gsfb_multipoles(out, I22, max_multipole=4, shot=None, nside=None, angle_aver
             a = b + d
             coef = np.where(a >= 0, (2 * a + 1) * _wigner3j_000_sq(np.maximum(a, 0), Lp, b), 0.0)
             P[Lp] += (1j) ** (-d) * (D @ coef)
+            if shot is not None:
+                P_shot[Lp] += (1j) ** (-d) * (Dshot @ coef)
 
-    P *= (4 * np.pi) ** 2 * (2 * np.arange(max_multipole + 1) + 1)[:, None] / I22
+    norm = (4 * np.pi) ** 2 * (2 * np.arange(max_multipole + 1) + 1)[:, None] / I22
     if angle_average:
-        P /= 4 * np.pi
-    return {"P": P, "k": out["k"], "multipoles": np.arange(max_multipole + 1)}
+        norm = norm / (4 * np.pi)
+    P, P_shot = P * norm, P_shot * norm
+    if shot is not None and not subtract_shot:
+        P = P + P_shot
+    res = {"P": P, "k": out["k"], "multipoles": np.arange(max_multipole + 1)}
+    if shot is not None:
+        res["P_shot"] = P_shot
+    return res
