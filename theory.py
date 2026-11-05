@@ -12,7 +12,7 @@ from scipy.interpolate import CubicSpline
 from mcfit import xi2P, P2xi
 
 class gsfb_model:
-    def __init__(self, ks, nofz, zmin, zmax, lmax, bg=1.0, zeff=None, camb_params=None, nquad=1024, nq=128, qmax=10.0):
+    def __init__(self, ks, nofz, zmin, zmax, lmax, bg=1.0, zeff=None, camb_params=None, nquad=1024, n_dq=4, qmax=10.0):
         """
         """
         self.nofz = nofz
@@ -23,10 +23,10 @@ class gsfb_model:
         self.lmax = lmax
         self.nquad = nquad
         self.bg = bg
-        self.nq = nq
+        self.n_dq = n_dq # replace nq: number of points per oscillation
         self.qmax = qmax
         self.ks = ks
-        self.qs = np.geomspace(1e-4, self.qmax, self.nq)
+        #self.qs = np.geomspace(1e-4, self.qmax, self.nq)
         self.ls = np.arange(self.lmax+1)# +1 to include l=0, +2 to include jl''(kx)
         
         if zeff is not None:
@@ -50,6 +50,7 @@ class gsfb_model:
         """
         self._run_camb()
         self._get_quad_weights()
+        self.qs = _make_q_grid(self.qmax, self.xmax, self.n_dq)
         integrand = lambda x: x**2*self.nofchi(x)#/nofchi_norm
         self.W = _matmul_W(self.ls, self.ks, self.qs, self.xn, self.wn, integrand)
         
@@ -64,11 +65,17 @@ class gsfb_model:
         plin_interp = self.pk_interp(self.qs)
         
         self.Cl = np.zeros((len(self.ls), len(self.ks)))
+        #for i in range(self.lmax+1):
+        #    self.Cl[i, :] = simpson(self.W[i, :, i, :]**2 * self.qs**2*plin_interp, x=self.qs)
+        #    self.Cl[i, :] /= simpson(self.W[i, :, i, :]**2 * self.qs**2, x=self.qs)
+
         for i in range(self.lmax+1):
-            self.Cl[i, :] = simpson(self.W[i, :, i, :]**2 * self.qs**2*plin_interp, x=self.qs)
-            self.Cl[i, :] /= simpson(self.W[i, :, i, :]**2 * self.qs**2, x=self.qs)
-        
-        pk_win = np.sum((2*self.ls+1)*self.Cl.T, axis=1) / np.sum(2*self.ls+1)
+            self.Cl[i, :] = 2/np.pi*simpson(self.W[i, :, i, :]**2 * self.qs**2*plin_interp, x=self.qs)
+            
+            self.I22 = 4*np.pi*np.sum(self.wn*self.xn**2*self.nofchi(self.xn)**2)
+            pk_win = 4*np.pi/self.I22*np.sum((2*self.ls+1)*self.Cl.T, axis=1)
+
+        #pk_win = np.sum((2*self.ls+1)*self.Cl.T, axis=1) / np.sum(2*self.ls+1)
         
         self.gsfb_multipoles = {'g':{'g':{0:self.bg**2*pk_win}}}
         
@@ -101,8 +108,14 @@ class gsfb_model:
         """
         # Linear weights for SFB
         x, w = roots_legendre(self.nquad) # xi and wi on -1, 1
-        self.xmin = self.results.comoving_radial_distance(self.zmin)
-        self.xmax = self.results.comoving_radial_distance(self.zmax)
+        #self.xmin = self.results.comoving_radial_distance(self.zmin)
+        #self.xmax = self.results.comoving_radial_distance(self.zmax)
+        self.h = self.pars.h
+        self.xmin = self.results.comoving_radial_distance(self.zmin)*self.h
+        self.xmax = self.results.comoving_radial_distance(self.zmax)*self.h
+        self.nofchi = lambda x: self.nofz(self.results.redshift_at_comoving_radial_distance(x/self.h))
+        if self.qmax is None:
+            self.qmax = self.ks.max() + 50/(self.xmax - self.xmin)
         self.xn = 0.5*(self.xmax-self.xmin)*x + 0.5*(self.xmax+self.xmin)
         self.wn = 0.5*(self.xmax-self.xmin)*w
 
@@ -145,3 +158,9 @@ def _matmul_W(ls, ks, qs, xn, wn, integrand):
 
     out = ((Jk.reshape(L*K, X) * F) @ Jq.reshape(M*Q, X).T).reshape(L, K, M, Q)
     return out
+
+def _make_q_grid(qmax, xmax, n_dq=4, qmin=1e-4, dlnq=0.02):
+    dq = np.pi/(n_dq*xmax)
+    qsw = min(dq/dlnq, qmax)
+    qlog = np.exp(np.arange(np.log(qmin), np.log(qsw), dlnq))
+    return np.append(qlog, np.arange(qsw, qmax+dq, dq))
